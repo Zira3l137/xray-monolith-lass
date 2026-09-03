@@ -5,7 +5,7 @@ void fix_texture_name(LPSTR fn);
 #include "dxRenderDeviceRender.h"
 
 void uber_deffer(CBlender_Compile& C, bool hq, LPCSTR _vspec, LPCSTR _pspec, BOOL _aref, LPCSTR _detail_replace,
-                 bool DO_NOT_FINISH, bool DO_NOT_WRITE)
+                 bool DO_NOT_FINISH, bool DO_NOT_WRITE, u32 _arefValue)
 {
 	// Uber-parse
 	string256 fname, fnameA, fnameB;
@@ -141,7 +141,8 @@ void uber_deffer(CBlender_Compile& C, bool hq, LPCSTR _vspec, LPCSTR _pspec, BOO
 
 		VERIFY(strstr(vs, "bump")!=0);
 		VERIFY(strstr(ps, "bump")!=0);
-		C.r_TessPass(vs, hs, ds, "null", ps, FALSE);
+		C.r_TessPass(vs, hs, ds, "null", ps, FALSE, TRUE, TRUE, FALSE, D3DBLEND_ONE, D3DBLEND_ZERO,
+		             _aref, _arefValue);
 		RImplementation.clearAllShaderOptions();
 		u32 stage = C.r_dx10Sampler("smp_bump_ds");
 		if (stage != -1)
@@ -160,8 +161,10 @@ void uber_deffer(CBlender_Compile& C, bool hq, LPCSTR _vspec, LPCSTR _pspec, BOO
 	}
 	else
 #	endif
-	if (DO_NOT_WRITE) C.r_Pass(vs, ps, FALSE, TRUE, FALSE);
-	else C.r_Pass(vs, ps, FALSE);
+	if (DO_NOT_WRITE)
+		C.r_Pass(vs, ps, FALSE, TRUE, FALSE, FALSE, D3DBLEND_ONE, D3DBLEND_ZERO, _aref, _arefValue);
+	else
+		C.r_Pass(vs, ps, FALSE, TRUE, TRUE, FALSE, D3DBLEND_ONE, D3DBLEND_ZERO, _aref, _arefValue);
 	//C.r_Sampler		("s_base",		C.L_textures[0],	false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);
 	//C.r_Sampler		("s_bumpX",		fnameB,				false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);	// should be before base bump
 	//C.r_Sampler		("s_bump",		fnameA,				false,	D3DTADDRESS_WRAP,	D3DTEXF_ANISOTROPIC,D3DTEXF_LINEAR,	D3DTEXF_ANISOTROPIC);
@@ -186,8 +189,10 @@ void uber_deffer(CBlender_Compile& C, bool hq, LPCSTR _vspec, LPCSTR _pspec, BOO
 		C.r_dx10Sampler("smp_rtlinear");
 	}
 #else	//	USE_DX10
-	if (DO_NOT_WRITE) C.r_Pass(vs, ps, FALSE, TRUE, FALSE);
-	else C.r_Pass(vs, ps, FALSE);
+	if (DO_NOT_WRITE)
+		C.r_Pass(vs, ps, FALSE, TRUE, FALSE, FALSE, D3DBLEND_ONE, D3DBLEND_ZERO, _aref, _arefValue);
+	else
+		C.r_Pass(vs, ps, FALSE, TRUE, TRUE, FALSE, D3DBLEND_ONE, D3DBLEND_ZERO, _aref, _arefValue);
 	VERIFY(C.L_textures[0].size());
 	if (bump)
 	{

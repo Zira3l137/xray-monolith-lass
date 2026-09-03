@@ -528,6 +528,12 @@ int ps_r__sun_grass_cull = 1;
 int ps_r__grass_smap_element = 1;
 int ps_r__cb_dirty_list = 1;
 
+// 1 serves def_aref as the live m_AlphaRef constant so alpha-tested bodies honour the
+// ref their pass authored; 0 restores the stock literal. Needs a shader cache clear.
+int ps_r__alpha_ref_live = 1;
+// 1 hashes the alpha-test threshold per pixel so TAA resolves a soft edge.
+int ps_r__alpha_dither = 1;
+
 //AVO: detail draw radius
 Flags32 ps_common_flags = {0}; // r1-only
 u32 ps_steep_parallax = 0;
@@ -1686,6 +1692,10 @@ void xrRender_initconsole()
 	CMD4(CCC_Integer, "r__sun_grass_cull", &ps_r__sun_grass_cull, 0, 1);
 	CMD4(CCC_Integer, "r__grass_smap_element", &ps_r__grass_smap_element, 0, 1);
 	CMD4(CCC_Integer, "r__cb_dirty_list", &ps_r__cb_dirty_list, 0, 2);
+
+	// Both need a shader cache clear and a restart: they change the served headers.
+	CMD4(CCC_Integer, "r__alpha_ref_live", &ps_r__alpha_ref_live, 0, 1);
+	CMD4(CCC_Integer, "r__alpha_dither", &ps_r__alpha_dither, 0, 1);
 	CMD3(CCC_Mask, "r__use_precompiled_shaders", &psDeviceFlags2, rsPrecompiledShaders); //Alundaio
 	CMD3(CCC_Mask, "r__enable_grass_shadow", &psDeviceFlags2, rsGrassShadow); //Alundaio
 	CMD3(CCC_Mask, "r__no_scale_on_fade", &psDeviceFlags2, rsNoScale); //Alundaio

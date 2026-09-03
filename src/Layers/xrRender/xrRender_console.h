@@ -425,6 +425,10 @@ extern ECORE_API int ps_r__light_lean;
 extern ECORE_API int ps_r__device_state_interval;
 // 0 scans every constant buffer slot on every draw like today, 1 walks only the bound slots, 2 also runs the full scan and reports misses
 extern ECORE_API int ps_r__cb_dirty_list;
+// the compile serves def_aref as the live m_AlphaRef constant, 0 restores the 200 literal
+extern ECORE_API int ps_r__alpha_ref_live;
+// 0 clips alpha-tested surfaces at the authored ref, 1 dithers the threshold for TAA
+extern ECORE_API int ps_r__alpha_dither;
 
 extern void xrRender_initconsole();
 extern BOOL xrRender_test_hw();
