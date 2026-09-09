@@ -1067,6 +1067,7 @@ u32 player_hud::motion_length(const MotionID& M, const CMotionDef*& md, float sp
 	if (md != nullptr && md->flags & esmStopAtEnd)
 	{
 		CMotion* motion = m_model->LL_GetRootMotion(M);
+		if (!motion) return 0;
 		return iFloor(0.5f + 1000.f * motion->GetLength() / (md->Dequantize(md->speed) * speed));
 	}
 	return 0;

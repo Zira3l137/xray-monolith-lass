@@ -321,17 +321,14 @@ float CKinematicsAnimated::get_animation_length(MotionID motion_ID)
 
 	SMotionsSlot& slot = m_Motions[motion_ID.slot];
 
-	VERIFY(LL_GetBoneRoot() < slot.bone_motions.size());
-
-	MotionVec* bone_motions = slot.bone_motions[LL_GetBoneRoot()];
-
-	VERIFY(motion_ID.idx < bone_motions->size());
+	CMotion* const rootM = LL_GetRootMotion(motion_ID);
+	if (!rootM) return 0.f;
 
 	CMotionDef* const m_def = slot.motions.motion_def(motion_ID.idx);
 
 	float const anim_speed = m_def ? m_def->Speed() : 1.f;
 
-	return bone_motions->at(motion_ID.idx).GetLength() / anim_speed;
+	return rootM->GetLength() / anim_speed;
 }
 
 void CKinematicsAnimated::IBlendSetup(CBlend& B, u16 part, u8 channel, MotionID motion_ID, BOOL bMixing,
@@ -359,7 +356,10 @@ void CKinematicsAnimated::IBlendSetup(CBlend& B, u16 part, u8 channel, MotionID 
 	B.speed = Speed;
 	B.motionID = motion_ID;
 	B.timeCurrent = 0;
-	B.timeTotal = m_Motions[B.motionID.slot].bone_motions[LL_GetBoneRoot()]->at(motion_ID.idx).GetLength();
+	{
+		CMotion* rootM = LL_GetRootMotion(motion_ID);
+		B.timeTotal = rootM ? rootM->GetLength() : SAMPLE_SPF;
+	}
 	B.bone_or_part = part;
 	B.stop_at_end = noloop;
 	B.playing = TRUE;
@@ -383,7 +383,10 @@ void CKinematicsAnimated::IFXBlendSetup(CBlend& B, MotionID motion_ID, float ble
 	B.speed = Speed;
 	B.motionID = motion_ID;
 	B.timeCurrent = 0;
-	B.timeTotal = m_Motions[B.motionID.slot].bone_motions[bone]->at(motion_ID.idx).GetLength();
+	{
+		CMotion* boneM = LL_GetMotion(motion_ID, bone);
+		B.timeTotal = boneM ? boneM->GetLength() : SAMPLE_SPF;
+	}
 	B.bone_or_part = bone;
 
 	B.playing = TRUE;
@@ -1037,8 +1040,10 @@ void CKinematicsAnimated::LL_BuldBoneMatrixDequatize(const CBoneData* bd, u8 cha
 			continue;
 		u8 channel = B->channel;
 		//keys.blend_factors[channel][b_count]	=  B->blendAmount;
+		CMotion* pM = LL_GetMotion(B->motionID, SelfID);
+		if (!pM) continue; // no track for this bone in that motion set
 		keys.blends[channel][b_count] = B;
-		CMotion& M = *LL_GetMotion(B->motionID, SelfID);
+		CMotion& M = *pM;
 		Dequantize(*D, *B, M);
 		QR2Quat(M._keysR[0], BK[channel][b_count].Q);
 		if (M.test_flag(flTKeyPresent))

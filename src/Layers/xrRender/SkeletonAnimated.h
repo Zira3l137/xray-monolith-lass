@@ -132,8 +132,21 @@ public:
 	const shared_motions& LL_MotionsSlot(u16 idx) { return m_Motions[idx].motions; }
 
 	IC CMotionDef* LL_GetMotionDef(MotionID id) { return id.valid() ? m_Motions[id.slot].motions.motion_def(id.idx) : nullptr; }
-	IC CMotion* LL_GetRootMotion(MotionID id) { return &m_Motions[id.slot].bone_motions[iRoot]->at(id.idx); }
-	IC CMotion* LL_GetMotion(MotionID id, u16 bone_id) { return &m_Motions[id.slot].bone_motions[bone_id]->at(id.idx); }
+
+	// bone_motions[] holds a null for any bone the motion set does not cover, and
+	// the slot/bone ids reaching here can come from a partition written by another
+	// skeleton. Both used to be dereferenced blind.
+	IC CMotion* LL_GetMotion(MotionID id, u16 bone_id)
+	{
+		if (!id.valid() || id.slot >= m_Motions.size()) return nullptr;
+		const BoneMotionsVec& bm = m_Motions[id.slot].bone_motions;
+		if (bone_id >= bm.size()) return nullptr;
+		MotionVec* mv = bm[bone_id];
+		if (!mv || id.idx >= mv->size()) return nullptr;
+		return &(*mv)[id.idx];
+	}
+
+	IC CMotion* LL_GetRootMotion(MotionID id) { return LL_GetMotion(id, iRoot); }
 
 	virtual IBlendDestroyCallback* GetBlendDestroyCallback();
 	virtual void SetBlendDestroyCallback(IBlendDestroyCallback* cb);
