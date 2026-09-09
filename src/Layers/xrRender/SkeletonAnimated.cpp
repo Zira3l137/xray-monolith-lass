@@ -789,6 +789,27 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 	m_Partition = NULL;
 	Update_LastTime = 0;
 
+	// A motions_value in g_pMotionsContainer was bound against whichever model loaded
+	// it first. Handing it to a model with a different bone set - an outfit that adds
+	// bones, say - leaves holes in bone_motions and, worse, hands this model the
+	// shared CPartition, whose bone ids belong to the other skeleton. The has() fast
+	// path below skips motions_value::load entirely, so the coverage check has to be
+	// repeated here for cache hits.
+	const auto motions_cover_model = [&](shared_motions& M) -> bool
+	{
+		for (u32 i = 0; i < bones->size(); ++i)
+		{
+			CBoneData* BD = (*bones)[i];
+			if (!BD) return false;
+			if (!M.bone_motions(BD->name))
+			{
+				Msg("! [MODEL-BIND] no motion track for bone '%s' in model '%s'", BD->name.c_str(), N);
+				return false;
+			}
+		}
+		return true;
+	};
+
 	const auto loadOMF = [&](LPCSTR _path)
 	{
 		string_path fn;
@@ -804,12 +825,23 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 		if (!g_pMotionsContainer->has(_path)) //optimize fs operations
 		{
 			IReader* MS = FS.r_open(fn);
+			if (!MS)
+			{
+				Msg("! error in model [%s]. Can't open motion file '%s'.", N, _path);
+				m_Motions.pop_back();
+				return;
+			}
 			create_res = m_Motions.back().motions.create(_path, MS, bones);
 			FS.r_close(MS);
 		}
 		if (create_res)
-			m_Motions.back().motions.create(_path, NULL, bones);
-		else
+			create_res = m_Motions.back().motions.create(_path, NULL, bones);
+
+		// cache hit or not, the shared motions must cover THIS skeleton
+		if (create_res && !motions_cover_model(m_Motions.back().motions))
+			create_res = false;
+
+		if (!create_res)
 		{
 			m_Motions.pop_back();
 			Msg("! error in model [%s]. Unable to load motion file '%s', section '%s'.", N, _path, current_player_hud_sect.c_str());
@@ -909,7 +941,14 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 		string_path nm;
 		strconcat(sizeof(nm), nm, N, ".ogf");
 		m_Motions.push_back(SMotionsSlot());
-		m_Motions.back().motions.create(nm, data, bones);
+		// an unbound slot leaves shared_motions::p_ null; every accessor on it only
+		// VERIFYs, so keeping it here turns into a null deref in release below
+		if (!m_Motions.back().motions.create(nm, data, bones) ||
+			!motions_cover_model(m_Motions.back().motions))
+		{
+			m_Motions.pop_back();
+			Msg("! error in model [%s]. Unable to bind embedded motions.", N);
+		}
 	}
 
 	// pip a model whose motions never bound cannot animate, the exit prompt shows when
@@ -941,6 +980,10 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 		{
 			CBoneData* BD = (*bones)[i];
 			MS.bone_motions[i] = MS.motions.bone_motions(BD->name);
+			// motions_cover_model() above guarantees this, but LL_GetMotion() has no
+			// null check of its own, so make the invariant explicit rather than
+			// discovering it in LL_BuldBoneMatrixDequatize
+			VERIFY(MS.bone_motions[i]);
 		}
 	}
 
