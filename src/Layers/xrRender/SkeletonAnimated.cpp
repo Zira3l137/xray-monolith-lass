@@ -748,6 +748,7 @@ void CKinematicsAnimated::Copy(dxRender_Visual* P)
 	// m_own_partition stays empty here. CModelPool refcounts a base for as long as
 	// any instance of it exists, so this pointer cannot outlive its owner.
 	PCOPY(m_Partition);
+	m_bone_has_motion = pFrom->m_bone_has_motion;
 
 	IBlend_Startup();
 }
@@ -823,22 +824,36 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 	Update_LastTime = 0;
 
 	// A motions_value in g_pMotionsContainer was bound against whichever model loaded
-	// it first. Handing it to a model with a different bone set - an outfit that adds
-	// bones, say - leaves holes in bone_motions and, worse, hands this model the
-	// shared CPartition, whose bone ids belong to the other skeleton. The has() fast
-	// path below skips motions_value::load entirely, so the coverage check has to be
-	// repeated here for cache hits.
-	const auto motions_cover_model = [&](shared_motions& M) -> bool
+	// it first, and the has() fast path below skips motions_value::load entirely, so
+	// nothing re-examines it for this skeleton. Coverage is not required - a bone
+	// with no track holds its bind pose - but it is worth naming once per model,
+	// because it is the difference between an intentional extra bone and a broken
+	// export. Returns false only when the set drives none of our bones at all.
+	const auto check_motion_coverage = [&](shared_motions& M) -> bool
 	{
+		u32 covered = 0, missing = 0;
 		for (u32 i = 0; i < bones->size(); ++i)
 		{
 			CBoneData* BD = (*bones)[i];
 			if (!BD) return false;
-			if (!M.bone_motions(BD->name))
+			if (M.bone_motions(BD->name))
 			{
-				Msg("! [MODEL-BIND] no motion track for bone '%s' in model '%s'", BD->name.c_str(), N);
-				return false;
+				++covered;
+				continue;
 			}
+			++missing;
+			Msg("! [MODEL-BIND] model '%s': bone '%s' has no motion track, holding bind pose",
+			    N, BD->name.c_str());
+		}
+		if (0 == covered)
+		{
+			Msg("! [MODEL-BIND] model '%s': motion set drives none of its bones", N);
+			return false;
+		}
+		if (missing && !M.bone_motions((*bones)[LL_GetBoneRoot()]->name))
+		{
+			Msg("! [MODEL-BIND] model '%s': motion set does not drive the root bone", N);
+			return false;
 		}
 		return true;
 	};
@@ -870,8 +885,8 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 		if (create_res)
 			create_res = m_Motions.back().motions.create(_path, NULL, bones);
 
-		// cache hit or not, the shared motions must cover THIS skeleton
-		if (create_res && !motions_cover_model(m_Motions.back().motions))
+		// cache hit or not, the shared motions have to be checked against THIS skeleton
+		if (create_res && !check_motion_coverage(m_Motions.back().motions))
 			create_res = false;
 
 		if (!create_res)
@@ -977,7 +992,7 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 		// an unbound slot leaves shared_motions::p_ null; every accessor on it only
 		// VERIFYs, so keeping it here turns into a null deref in release below
 		if (!m_Motions.back().motions.create(nm, data, bones) ||
-			!motions_cover_model(m_Motions.back().motions))
+			!check_motion_coverage(m_Motions.back().motions))
 		{
 			m_Motions.pop_back();
 			Msg("! error in model [%s]. Unable to bind embedded motions.", N);
@@ -1009,6 +1024,8 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 	m_Partition->load(this, N); // .ltx override, names only
 	m_Partition->rebind(this); // names -> indices, against this vecBones
 
+	m_bone_has_motion.assign(bones->size(), false);
+
 	// initialize motions
 	for (MotionsSlotVecIt m_it = m_Motions.begin(); m_it != m_Motions.end(); m_it++)
 	{
@@ -1018,10 +1035,11 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 		{
 			CBoneData* BD = (*bones)[i];
 			MS.bone_motions[i] = MS.motions.bone_motions(BD->name);
-			// motions_cover_model() above guarantees this, but LL_GetMotion() has no
-			// null check of its own, so make the invariant explicit rather than
-			// discovering it in LL_BuldBoneMatrixDequatize
-			VERIFY(MS.bone_motions[i]);
+			// A null here is legal and means "this motion set does not drive this
+			// bone": LL_GetMotion() returns null and the blend is skipped. Remember
+			// which bones ARE driven, by any slot, so LL_BoneMatrixBuild can tell a
+			// permanently unanimated bone from one that is merely between cycles.
+			if (MS.bone_motions[i]) m_bone_has_motion[i] = true;
 		}
 	}
 
@@ -1093,7 +1111,27 @@ void CKinematicsAnimated::LL_BoneMatrixBuild(u16 bone_id, CBoneInstance& bi, con
 	MixChannels(Result, channel_keys, BC, ch_count);
 
 	Fmatrix RES;
-	RES.mk_xform(Result.Q, Result.T);
+
+	// With zero blends MixInterlerp yields Q = (0,0,0,0) / T = 0, mk_xform turns that
+	// zero quaternion into the identity, and the bone ends up welded to its parent.
+	// For a bone no motion set drives that is wrong - it should hold its bind pose,
+	// which is what the rigid path (CKinematics::BuildBoneMatrix) already does.
+	//
+	// But zero blends is ALSO the normal transient state of a bone whose partition is
+	// between cycles, and those frames must keep stock behaviour: swapping such a bone
+	// to bind pose for one frame and back the next makes it alternate between two
+	// unrelated transforms, which reads as a violent shake on whichever partition is
+	// transitioning. So gate on the bone, decided once in Load(), not on this frame.
+	const bool bone_never_animated = (bone_id < m_bone_has_motion.size())
+		                                 && !m_bone_has_motion[bone_id];
+	u32 total_blends = 0;
+	for (u16 j = 0; MAX_CHANNELS > j; ++j)
+		total_blends += u32(keys.chanel_blend_conts[j]);
+
+	if (bone_never_animated && 0 == total_blends)
+		RES.set(LL_GetData(bone_id).bind_transform);
+	else
+		RES.mk_xform(Result.Q, Result.T);
 	
 	if (LL_GetBoneVisible(bone_id))
 	{

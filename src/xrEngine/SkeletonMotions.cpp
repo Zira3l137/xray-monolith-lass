@@ -151,7 +151,11 @@ BOOL motions_value::load(LPCSTR N, IReader* data, vecBones* bones)
 
 	bool bRes = true;
 	// Load definitions
+	// Indexed by the MOTION FILE's track index; the value is the model bone that
+	// track drives, or BI_NONE when this model has no such bone. Grows to the file's
+	// track count, which need not equal the model's bone count in either direction.
 	U16Vec rm_bones(bones->size(), BI_NONE);
+	u32 motion_bone_count = 0; // tracks per motion in the file
 	// marks model bones the partitions actually reference so mismatches can be named
 	xr_vector<bool> bone_covered;
 	bone_covered.resize(bones->size(), false);
@@ -170,10 +174,29 @@ BOOL motions_value::load(LPCSTR N, IReader* data, vecBones* bones)
 		// partitions
 		u16 part_count = MP->r_u16();
 
+		if (part_count > MAX_PARTS)
+		{
+			// CPartition::create() refuses to grow past MAX_PARTS, so the old
+			// "while (!PART) PART = m_partition.create();" spun forever on a file
+			// that declares more partitions than the engine supports.
+			Msg("! [MODEL-FATAL] motion file declares %u partitions, the engine supports %u (%s)",
+			    u32(part_count), u32(MAX_PARTS), N);
+			bind_fail_note("motion file declares more partitions than the engine supports");
+			MP->close();
+			return false;
+		}
+
 		for (u16 part_i = 0; part_i < part_count; part_i++)
 		{
 			CPartDef* PART = m_partition[part_i];
-			while (!PART) PART = m_partition.create();
+			if (!PART) PART = m_partition.create();
+			if (!PART)
+			{
+				Msg("! [MODEL-FATAL] cannot allocate partition %u (%s)", u32(part_i), N);
+				bind_fail_note("cannot allocate motion partition");
+				MP->close();
+				return false;
+			}
 			MP->r_stringZ(buf, sizeof(buf));
 			PART->Name = _strlwr(buf);
 			PART->bones.resize(MP->r_u16());
@@ -201,14 +224,16 @@ BOOL motions_value::load(LPCSTR N, IReader* data, vecBones* bones)
 
 				if (rm_bones.size() <= m_idx)
 				{
-					++skipped_entries;
-					string256 line;
-					xr_sprintf(line, "motions bone index %u exceeds the model bone count %u", u32(m_idx), u32(rm_bones.size()));
-					Msg("! [MODEL-BIND] %s (%s)", line, N);
-					bind_fail_note(line);
+					// The remap table is indexed by the MOTION FILE's track index, not
+					// by model bone id, so it has to span the file's track count even
+					// when the file carries tracks this model has no bone for. Those
+					// slots stay BI_NONE and their keys are skipped over below.
+					rm_bones.resize(u32(m_idx) + 1, BI_NONE);
 				}
+				if (motion_bone_count < u32(m_idx) + 1)
+					motion_bone_count = u32(m_idx) + 1;
 
-				if (*b_it != BI_NONE && m_idx < rm_bones.size())
+				if (*b_it != BI_NONE)
 				{
 					rm_bones[m_idx] = u16(*b_it);
 					++bound_entries;
@@ -236,27 +261,50 @@ BOOL motions_value::load(LPCSTR N, IReader* data, vecBones* bones)
 			}
 		}
 
-		// names the model bones no partition covers so authors can fix the export
+		// Model bones the file has no track for. This is NOT an error: an armature
+		// that adds bones on top of a stock one still animates correctly through a
+		// stock motion set, and the added bones hold their bind pose (see
+		// CKinematicsAnimated::LL_BoneMatrixBuild). Report it so an author can tell
+		// an intentional addition from a broken export, and carry on.
 		if (part_bone_cnt != (u16)bones->size())
 		{
 			string256 line;
 			xr_sprintf(line, "motions cover %u bones, the model has %u", u32(part_bone_cnt), u32(bones->size()));
 			Msg("! [MODEL-BIND] %s (%s)", line, N);
-			bind_fail_note(line);
 			u32 uncovered = 0;
 			for (u32 bi = 0; bi < bone_covered.size(); ++bi)
 			{
 				if (bone_covered[bi]) continue;
-				xr_sprintf(line, "model bone '%s' is not in the motions", bones->at(bi)->name.c_str());
-				Msg("! [MODEL-BIND] %s (%s)", line, N);
-				if (++uncovered <= 6) bind_fail_note(line);
+				++uncovered;
+				Msg("! [MODEL-BIND] model bone '%s' has no motion track, it will hold its bind pose (%s)",
+				    bones->at(bi)->name.c_str(), N);
 			}
-			if (uncovered > 6)
+			if (uncovered)
 			{
-				xr_sprintf(line, "and %u more, see the log", uncovered - 6);
+				xr_sprintf(line, "%u model bone(s) have no motion track and will hold their bind pose",
+				           uncovered);
 				bind_fail_note(line);
 			}
 		}
+
+		// What IS fatal is a file with no usable tracks at all: nothing would move.
+		if (bRes && 0 == motion_bone_count)
+		{
+			bRes = false;
+			Msg("! [MODEL-FATAL] motion file declares no bone tracks (%s)", N);
+			bind_fail_note("motion file declares no bone tracks");
+		}
+
+		// The root bone is what every blend takes its length from, so a file that
+		// does not drive it cannot time an animation.
+		if (bRes && !bone_covered.empty() && !bone_covered[0])
+		{
+			bRes = false;
+			Msg("! [MODEL-FATAL] no motion track for the root bone '%s' (%s)",
+			    bones->at(0)->name.c_str(), N);
+			bind_fail_note("no motion track for the root bone");
+		}
+
 		if (bRes)
 		{
 			// motion defs (cycle&fx)
@@ -296,9 +344,15 @@ BOOL motions_value::load(LPCSTR N, IReader* data, vecBones* bones)
 	MS->r_chunk_safe(0, &dwCNT, sizeof(dwCNT));
 	VERIFY(dwCNT < 0x3FFF); // MotionID 2 bit - slot, 14 bit - motion index
 
-	// set per bone motion size
-	for (u32 i = 0; i < bones->size(); i++)
-		m_motions[bones->at(i)->name].resize(dwCNT);
+	// One MotionVec per model bone the file actually drives. Bones with no track get
+	// no map entry at all, so bone_motions() reports them as absent rather than
+	// handing out a vector of uninitialised CMotions.
+	for (u32 t = 0; t < motion_bone_count; t++)
+	{
+		const u16 bone_id = rm_bones[t];
+		if (BI_NONE == bone_id) continue;
+		m_motions[bones->at(bone_id)->name].resize(dwCNT);
+	}
 
 	// load motions
 	for (u16 m_idx = 0; m_idx < (u16)dwCNT; m_idx++)
@@ -314,20 +368,56 @@ BOOL motions_value::load(LPCSTR N, IReader* data, vecBones* bones)
         VERIFY3 (I->second==m_idx,"Invalid motion index:",mname);
 #endif
 		u32 dwLen = MS->r_u32();
-		for (u32 i = 0; i < bones->size(); i++)
+		if (0 == dwLen || dwLen > 0x00FFFFFF)
 		{
-			u16 bone_id = rm_bones[i];
-			VERIFY2(bone_id != BI_NONE, "Invalid remap index.");
+			// CMotion::_count is a 24 bit field and every consumer divides by it
+			Msg("! [MODEL-FATAL] motion %u declares %u keys (%s)", u32(m_idx), dwLen, N);
+			MS->close();
+			return false;
+		}
+		// Iterate the FILE's tracks, not the model's bones. The two counts are
+		// independent: a stock motion set has fewer tracks than an armature with
+		// extra bones, and a superset set has more. Driving the loop by bones->size()
+		// was what made the reader walk off the end of the chunk.
+		CMotion scratch; // receives tracks this model has no bone for
+		for (u32 t = 0; t < motion_bone_count; t++)
+		{
+			const u16 bone_id = rm_bones[t];
 
-			if ((bones->size() - 1) < bone_id)
+			// Every read below walks the chunk by hand via pointer()/advance(), which
+			// does no bounds checking of its own. One flag byte plus, worst case, a crc
+			// and a full key run has to still be inside the chunk before we touch it.
+			if (MS->elapsed() < 1)
 			{
+				Msg("! [MODEL-FATAL] motion stream ends inside motion %u, track %u (%s)",
+				    u32(m_idx), t, N);
 				MS->close();
 				return false;
 			}
 
-			CMotion& M = m_motions[bones->at(bone_id)->name][m_idx];
+			// A track with no matching bone still has to be consumed so the reader
+			// stays aligned; its keys are parsed into scratch and dropped.
+			CMotion& M = (BI_NONE == bone_id)
+				             ? scratch
+				             : m_motions[bones->at(bone_id)->name][m_idx];
 			M.set_count(dwLen);
 			M.set_flags(MS->r_u8());
+
+			const u32 r_bytes = M.test_flag(flRKeyAbsent)
+				                    ? u32(sizeof(CKeyQR))
+				                    : u32(sizeof(u32) + dwLen * sizeof(CKeyQR));
+			const u32 t_bytes = M.test_flag(flTKeyPresent)
+				                    ? u32(sizeof(u32) + dwLen * (M.test_flag(flTKey16IsBit)
+					                                                ? sizeof(CKeyQT16)
+					                                                : sizeof(CKeyQT8)) + 2 * sizeof(Fvector))
+				                    : u32(sizeof(Fvector));
+			if (u32(MS->elapsed()) < r_bytes + t_bytes)
+			{
+				Msg("! [MODEL-FATAL] motion stream too short for motion %u, track %u (%s)",
+				    u32(m_idx), t, N);
+				MS->close();
+				return false;
+			}
 
 			if (M.test_flag(flRKeyAbsent))
 			{

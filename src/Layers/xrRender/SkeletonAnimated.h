@@ -98,6 +98,12 @@ private:
 	CPartition m_own_partition;
 	CPartition* m_Partition;
 
+	// True for every bone at least one loaded motion set actually drives. This is a
+	// fixed property of the model, decided in Load(), NOT a per-frame condition:
+	// a bone that is normally animated still has frames with no blends while one
+	// cycle fades out and the next has not started.
+	xr_vector<bool> m_bone_has_motion;
+
 	IBlendDestroyCallback* m_blend_destroy_callback;
 	IUpdateTracksCallback* m_update_tracks_callback;
 	// Blending
