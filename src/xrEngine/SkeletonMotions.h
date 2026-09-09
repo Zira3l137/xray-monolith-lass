@@ -195,7 +195,9 @@ public:
 	IC const CPartDef* part(u16 id) const { return P.size() > id ? P.at(id) : nullptr; }
 	CPartDef* create()
 	{
-		if (P.size() > MAX_PARTS) return nullptr;
+		// was '>', which let P grow to MAX_PARTS + 1 while every consumer of a
+		// partition iterates and range-checks against MAX_PARTS
+		if (P.size() >= MAX_PARTS) return nullptr;
 		P.emplace_back(xr_new<CPartDef>());
 		return P.back();
 	}

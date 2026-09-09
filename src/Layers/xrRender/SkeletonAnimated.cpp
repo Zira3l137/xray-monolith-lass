@@ -44,6 +44,28 @@ void CBlendInstance::blend_remove(CBlend* H)
 	if (I != Blend.end()) Blend.erase(I);
 }
 
+// The CPartition a visual animates through is owned by the shared motions_value, so
+// it can have been written by a different skeleton (see CKinematicsAnimated::Load),
+// and CPartition::load() historically stored BI_NONE for bones the model does not
+// have. Either way, indexing vecBones with the raw value yields a garbage
+// CBoneData*, whose GetSelfID() is then used to index blend_instances - an out of
+// bounds write into the xr_alloc'd CBlendInstance array, i.e. silent heap
+// corruption that only surfaces later somewhere unrelated. Filter here.
+static CBoneData* part_bone(vecBones* bones, u32 bone_id, LPCSTR dbg)
+{
+	if (bone_id < bones->size())
+		return (*bones)[bone_id];
+
+	static u32 s_reported = 0;
+	if (s_reported < 16)
+	{
+		++s_reported;
+		Msg("! [MODEL] partition references bone %u, model '%s' has %u bones - skipped",
+		    bone_id, dbg ? dbg : "?", u32(bones->size()));
+	}
+	return nullptr;
+}
+
 // Motion control
 void CKinematicsAnimated::Bone_Motion_Start(CBoneData* bd, CBlend* handle)
 {
@@ -283,7 +305,8 @@ void CKinematicsAnimated::LL_CloseCycle(u16 part, u8 mask_channel /*= (1<<0)*/)
 		CPartDef* P = (*m_Partition)[B.bone_or_part];
 		if (nullptr == P) return;
 		for (u32 i = 0; i < P->bones.size(); i++)
-			Bone_Motion_Stop_IM((*bones)[P->bones[i]], *I);
+			if (CBoneData* bd = part_bone(bones, P->bones[i], *getDebugName()))
+				Bone_Motion_Stop_IM(bd, *I);
 
 		blend_cycles[part].erase(I); // ?
 		E = blend_cycles[part].end();
@@ -410,10 +433,11 @@ CBlend* CKinematicsAnimated::LL_PlayCycle(u16 part, MotionID motion_ID, BOOL bMi
 	            CallbackParam);
 	for (u32 i = 0; i < P->bones.size(); i++)
 	{
-		if (!(*bones)[P->bones[i]])
-			Debug.fatal(DEBUG_INFO, "! MODEL: missing bone/wrong armature? : %s", *getDebugName());
-
-		Bone_Motion_Start_IM((*bones)[P->bones[i]], B);
+		// was Debug.fatal() on a null bone, which both crashed the game on a
+		// recoverable authoring mistake and did nothing at all about an index past
+		// the end of vecBones - the case that actually corrupts the heap
+		if (CBoneData* bd = part_bone(bones, P->bones[i], *getDebugName()))
+			Bone_Motion_Start_IM(bd, B);
 	}
 	blend_cycles[part].push_back(B);
 	return B;
@@ -520,13 +544,15 @@ CBlend* CKinematicsAnimated::LL_PlayFX(u16 bone, MotionID motion_ID, float blend
 	if (!motion_ID.valid()) return 0;
 	if (blend_fx.size() >= MAX_BLENDED) return 0;
 	if (BI_NONE == bone) bone = iRoot;
+	CBoneData* fx_bone = part_bone(bones, bone, *getDebugName());
+	if (!fx_bone) return 0;
 
 	CBlend* B = IBlend_Create();
 	if (!B) return 0;
 
 	_DBG_SINGLE_USE_MARKER;
 	IFXBlendSetup(*B, motion_ID, blendAccrue, blendFalloff, Power, Speed, bone);
-	Bone_Motion_Start((*bones)[bone], B);
+	Bone_Motion_Start(fx_bone, B);
 
 	blend_fx.push_back(B);
 	return B;
@@ -541,7 +567,8 @@ void CKinematicsAnimated::DestroyCycle(CBlend& B)
 	const CPartDef* P = m_Partition->part(B.bone_or_part);
 	if (nullptr == P) return;
 	for (u32 i = 0; i < P->bones.size(); i++)
-		Bone_Motion_Stop_IM((*bones)[P->bones[i]], &B);
+		if (CBoneData* bd = part_bone(bones, P->bones[i], *getDebugName()))
+			Bone_Motion_Stop_IM(bd, &B);
 }
 
 

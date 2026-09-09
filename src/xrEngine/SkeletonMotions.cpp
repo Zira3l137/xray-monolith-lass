@@ -60,6 +60,13 @@ void CPartition::load(IKinematics* V, LPCSTR model_name)
 			else
 			{
 				u32 bid = V->LL_BoneID(I.first.c_str());
+				if (BI_NONE == bid)
+				{
+					// storing this meant vecBones[65535] later on
+					Msg("! [MODEL-BIND] partition bone '%s' is not in model '%s' - skipped",
+					    I.first.c_str(), model_name);
+					continue;
+				}
 				P[i]->bones.push_back(bid);
 			}
 		}
