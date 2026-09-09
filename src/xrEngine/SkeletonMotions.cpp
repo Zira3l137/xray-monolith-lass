@@ -22,6 +22,60 @@ u16 CPartition::part_id(const shared_str& name) const
 	return u16(-1);
 }
 
+void CPartDef::rebind(IKinematics* V)
+{
+	bones.clear_not_free();
+	if (!V) return;
+
+	bones.reserve(bone_names.size());
+	for (const shared_str& nm : bone_names)
+	{
+		const u16 bid = V->LL_BoneID(nm);
+		if (BI_NONE == bid)
+		{
+			// pushing this was how vecBones[65535] used to happen downstream
+			Msg("! [MODEL-BIND] partition '%s': bone '%s' is not in this skeleton - skipped",
+			    Name.c_str(), nm.c_str());
+			continue;
+		}
+		bones.push_back(bid);
+	}
+}
+
+void CPartition::copy_from(const CPartition& rhs)
+{
+	for (auto& PartDef : P)
+		xr_delete(PartDef);
+	P.clear_not_free();
+	P.reserve(MAX_PARTS);
+
+	for (const CPartDef* src : rhs.P)
+	{
+		CPartDef* dst = xr_new<CPartDef>();
+		if (src)
+		{
+			dst->Name = src->Name;
+			dst->bones = src->bones;
+			dst->bone_names = src->bone_names;
+		}
+		P.emplace_back(dst);
+	}
+}
+
+void CPartition::rebind(IKinematics* V)
+{
+	for (CPartDef* PartDef : P)
+		if (PartDef) PartDef->rebind(V);
+}
+
+u32 CPartition::mem_usage()
+{
+	u32 sz = sizeof(*this);
+	for (CPartDef* PartDef : P)
+		if (PartDef) sz += PartDef->mem_usage();
+	return sz;
+}
+
 void CPartition::load(IKinematics* V, LPCSTR model_name)
 {
 	string_path fn, fn_full;
@@ -48,7 +102,12 @@ void CPartition::load(IKinematics* V, LPCSTR model_name)
 		if (!S.Data.size()) continue;
 
 		while (!P[i]) create();
-		P[i]->bones.clear_not_free();
+
+		// Names only. Resolving to indices is rebind()'s job, so that this override
+		// and the names inherited from the motion file go through one code path and
+		// end up bound to the same skeleton.
+		xr_vector<shared_str> names;
+		names.reserve(S.Data.size());
 
 		for (; it != it_e; ++it)
 		{
@@ -59,18 +118,13 @@ void CPartition::load(IKinematics* V, LPCSTR model_name)
 			}
 			else
 			{
-				u32 bid = V->LL_BoneID(I.first.c_str());
-				if (BI_NONE == bid)
-				{
-					// storing this meant vecBones[65535] later on
-					Msg("! [MODEL-BIND] partition bone '%s' is not in model '%s' - skipped",
-					    I.first.c_str(), model_name);
-					continue;
-				}
-				P[i]->bones.push_back(bid);
+				names.push_back(I.first);
 			}
 		}
+		P[i]->set_bone_names(names);
 	}
+
+	rebind(V);
 }
 
 u16 find_bone_id(vecBones* bones, shared_str nm)
@@ -123,11 +177,15 @@ BOOL motions_value::load(LPCSTR N, IReader* data, vecBones* bones)
 			MP->r_stringZ(buf, sizeof(buf));
 			PART->Name = _strlwr(buf);
 			PART->bones.resize(MP->r_u16());
+			// the names are what makes this partition portable to another skeleton
+			PART->bone_names.clear_not_free();
+			PART->bone_names.reserve(PART->bones.size());
 
 			for (xr_vector<u32>::iterator b_it = PART->bones.begin(); b_it < PART->bones.end(); b_it++)
 			{
 				MP->r_stringZ(buf, sizeof(buf));
 				u16 m_idx = u16(MP->r_u32());
+				PART->bone_names.push_back(buf);
 				*b_it = find_bone_id(bones, buf);
 				if (*b_it == BI_NONE)
 				{

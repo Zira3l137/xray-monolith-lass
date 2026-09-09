@@ -86,6 +86,16 @@ private:
 	DEFINE_VECTOR(SMotionsSlot, MotionsSlotVec, MotionsSlotVecIt);
 	MotionsSlotVec m_Motions;
 
+	// The partition a visual animates through is skeleton-specific: it holds indices
+	// into this model's vecBones. It used to point straight at the CPartition owned
+	// by the shared motions_value, so every model loading the same OMF rewrote the
+	// same object with its own bone ids and the last one to load won. Own it here
+	// instead, built from the motion file's declared bone NAMES.
+	//
+	// m_Partition still points rather than being the storage, because instances made
+	// by CKinematicsAnimated::Copy share the base model's skeleton and therefore its
+	// partition, exactly as before.
+	CPartition m_own_partition;
 	CPartition* m_Partition;
 
 	IBlendDestroyCallback* m_blend_destroy_callback;

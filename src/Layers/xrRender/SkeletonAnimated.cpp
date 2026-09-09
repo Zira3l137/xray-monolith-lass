@@ -744,6 +744,9 @@ void CKinematicsAnimated::Copy(dxRender_Visual* P)
 
 	CKinematicsAnimated* pFrom = (CKinematicsAnimated*)P;
 	PCOPY(m_Motions);
+	// An instance shares the base model's skeleton, so it shares its partition;
+	// m_own_partition stays empty here. CModelPool refcounts a base for as long as
+	// any instance of it exists, so this pointer cannot outlive its owner.
 	PCOPY(m_Partition);
 
 	IBlend_Startup();
@@ -992,14 +995,19 @@ void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 		if (!g_pGamePersistent || !g_pGamePersistent->OnModelLoadFatal(detail.c_str()))
 			Msg("! [MODEL-FATAL] no exit prompt available, the model stands down");
 		// an empty partition keeps every animation consumer a no-op until the teardown
-		static CPartition s_fatal_partition;
-		m_Partition = &s_fatal_partition;
+		m_Partition = &m_own_partition;
 		IBlend_Startup();
 		return;
 	}
 
-	m_Partition = m_Motions[0].motions.partition();
-	m_Partition->load(this, N);
+	// Take our own copy of the motion file's partition and bind it to THIS skeleton.
+	// The copy carries the declared bone names, so a model whose bone list differs
+	// from whichever model first loaded this OMF resolves its own indices instead of
+	// inheriting the other one's.
+	m_own_partition = *m_Motions[0].motions.partition();
+	m_Partition = &m_own_partition;
+	m_Partition->load(this, N); // .ltx override, names only
+	m_Partition->rebind(this); // names -> indices, against this vecBones
 
 	// initialize motions
 	for (MotionsSlotVecIt m_it = m_Motions.begin(); m_it != m_Motions.end(); m_it++)
