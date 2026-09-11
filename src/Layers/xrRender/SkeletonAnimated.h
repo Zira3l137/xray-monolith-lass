@@ -210,6 +210,8 @@ public:
 	CBlend* PlayFX_Safe (LPCSTR N, float power_scale) override;
 
 	const CPartition& partitions() const { return *m_Partition; };
+	virtual void adopt_partition(const CPartition& layout);
+
 
 	// General "Visual" stuff
 	virtual void Copy(dxRender_Visual* pFrom);

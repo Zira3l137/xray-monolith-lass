@@ -814,6 +814,24 @@ CBlend* CKinematicsAnimated::IBlend_Create()
 	return 0;
 }
 
+void CKinematicsAnimated::adopt_partition(const CPartition& layout)
+{
+	// Self-assignment would destroy the CPartDefs out from under copy_from().
+	if (&layout == m_Partition) return;
+
+	// Take the layout by value, then re-resolve it. The copy carries the
+	// declared bone NAMES, which are the authoritative part of a partition;
+	// the indices that come with it belong to the donor's skeleton and are
+	// overwritten by rebind() below.
+	m_own_partition = layout;
+	m_Partition = &m_own_partition;
+	m_Partition->rebind(this);
+
+	// blend_cycles is a fixed MAX_PARTS array, so nothing about the blend pool
+	// depends on the partition count and no IBlend_Startup() is needed here.
+	// Callers are expected to do this before anything is playing.
+}
+
 void CKinematicsAnimated::Load(const char* N, IReader* data, u32 dwFlags)
 {
 	inherited::Load(N, data, dwFlags);
