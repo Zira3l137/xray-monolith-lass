@@ -1,0 +1,126 @@
+name: DX11-AVX
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A newer commit on the same branch makes the in-flight build pointless.
+concurrency:
+  group: dx11avx-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  SOLUTION: src/engine-vs2022.sln
+  CONFIGURATION: DX11-AVX
+  PLATFORM: x64
+  BIN_DIR: _build/_game/bin_dbg
+
+jobs:
+  build:
+    name: Build ${{ github.ref_name }}
+    runs-on: windows-latest
+
+    steps:
+      # xrEngine links the whole engine into one binary with WPO, which needs
+      # more commit than the runner's default pagefile provides.
+      - name: Configure pagefile
+        uses: al-cheb/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 8GB
+          maximum-size: 8GB
+          disk-root: "C:"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: Build
+        run: >
+          msbuild ${{ env.SOLUTION }}
+          /m
+          /p:Configuration=${{ env.CONFIGURATION }}
+          /p:Platform=${{ env.PLATFORM }}
+          /v:minimal
+          /nologo
+
+      - name: Collect output
+        id: collect
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "${{ env.BIN_DIR }}/AnomalyDX11AVX.exe" -ErrorAction SilentlyContinue
+          if (-not $exe) {
+            Write-Error "AnomalyDX11AVX.exe not found in ${{ env.BIN_DIR }}"
+            Get-ChildItem "${{ env.BIN_DIR }}" -ErrorAction SilentlyContinue | Format-Table Name,Length
+            exit 1
+          }
+
+          $sha = "${{ github.sha }}".Substring(0,7)
+          "short_sha=$sha" >> $env:GITHUB_OUTPUT
+
+          New-Item -ItemType Directory -Force -Path staging/bin | Out-Null
+          Copy-Item $exe.FullName staging/bin/
+
+          @(
+            "configuration : ${{ env.CONFIGURATION }} | ${{ env.PLATFORM }}"
+            "commit        : ${{ github.sha }}"
+            "branch        : ${{ github.ref_name }}"
+            "built         : $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')) UTC"
+            "run           : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          ) | Set-Content staging/bin/build-info.txt
+
+          Compress-Archive -Path staging/bin/* -DestinationPath "xray-monolith-lass_DX11-AVX_$sha.zip"
+
+          $pdb = Get-ChildItem "${{ env.BIN_DIR }}/*.pdb" -ErrorAction SilentlyContinue
+          if ($pdb) {
+            Compress-Archive -Path $pdb.FullName -DestinationPath "xray-monolith-lass_DX11-AVX_$sha`_pdb.zip"
+          }
+
+      # Every push gets a downloadable artifact, including branches and PRs.
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DX11-AVX-${{ steps.collect.outputs.short_sha }}
+          path: "*.zip"
+          if-no-files-found: error
+          retention-days: 14
+
+      # Only the default branch moves the rolling release, so work on a feature
+      # branch never overwrites what people are downloading.
+      - name: Publish rolling "latest" release
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # The tag has to move to the new commit, and a release cannot be
+          # retargeted in place, so drop both and recreate.
+          gh release delete latest --yes --cleanup-tag || true
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/latest" --silent || true
+
+          SUBJECT=$(git log -1 --pretty=%s)
+          gh release create latest \
+            --title "Latest DX11-AVX (${{ steps.collect.outputs.short_sha }})" \
+            --target "${GITHUB_SHA}" \
+            --prerelease \
+            --notes "Rolling build of the default branch. Replaced on every push.
+
+          **Commit:** \`${{ github.sha }}\`
+          **Message:** ${SUBJECT}
+          **Configuration:** DX11-AVX | x64
+
+          Drop \`AnomalyDX11AVX.exe\` into your Anomaly \`bin\` folder. The \`_pdb\` archive is only needed for reading crash dumps." \
+            *.zip
